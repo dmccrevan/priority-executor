@@ -1,0 +1,14 @@
+[package]
+name = "priority-executor"
+version = "0.1.0"
+authors = ["Daniel McCrevan <danielmccrevan@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-task = "1.3.0"
+crossbeam = "0.7.3"
+futures = "0.3.1"
+once_cell = "1.3.1"
+threadpool = "1.8.1"
