@@ -280,6 +280,7 @@ dependencies = [
  "async-task",
  "crossbeam",
  "futures",
+ "num_cpus",
  "once_cell",
  "threadpool",
 ]

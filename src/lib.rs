@@ -1,5 +1,8 @@
+use crossbeam::channel;
+use once_cell::sync::Lazy;
+use std::cmp::{max, Ordering};
+use std::collections::BinaryHeap;
 use std::future::Future;
-use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -7,10 +10,34 @@ use std::thread;
 use std::time;
 use threadpool::ThreadPool;
 
-use crossbeam::channel;
-use once_cell::sync::Lazy;
+pub struct JoinHandle<R>(async_task::JoinHandle<R, ()>);
 
-struct JoinHandle<R>(async_task::JoinHandle<R, ()>);
+pub type Task = async_task::Task<()>;
+
+struct TaskContainer {
+    t: Task,
+    priority: usize,
+}
+
+impl Eq for TaskContainer {}
+
+impl PartialEq for TaskContainer {
+    fn eq(&self, other: &TaskContainer) -> bool {
+        other.priority.eq(&self.priority)
+    }
+}
+
+impl Ord for TaskContainer {
+    fn cmp(&self, other: &TaskContainer) -> Ordering {
+        other.priority.cmp(&self.priority)
+    }
+}
+
+impl PartialOrd for TaskContainer {
+    fn partial_cmp(&self, other: &TaskContainer) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl<R> Future for JoinHandle<R> {
     type Output = R;
@@ -22,31 +49,29 @@ impl<R> Future for JoinHandle<R> {
     }
 }
 
-type Task = async_task::Task<()>;
-static QUEUE: Lazy<channel::Sender<Task>> = Lazy::new(|| {
-    let v: Arc<Mutex<Vec<Task>>> = Arc::new(Mutex::new(Vec::new()));
-    let (sender, receiver) = channel::unbounded::<Task>();
+#[allow(dead_code)]
+static QUEUE: Lazy<channel::Sender<TaskContainer>> = Lazy::new(|| {
+    let h: Arc<Mutex<BinaryHeap<TaskContainer>>> = Arc::new(Mutex::new(BinaryHeap::new()));
+    let (sender, receiver) = channel::unbounded::<TaskContainer>();
     thread::spawn({
-        let v = Arc::clone(&v);
+        let h = Arc::clone(&h);
         move || {
             receiver.iter().for_each(|task| {
                 println!("Task received!");
-                let mut vector = v.lock().unwrap();
-                vector.push(task);
+                let mut heap = h.lock().unwrap();
+                heap.push(task);
             })
         }
     });
     thread::spawn({
-        let v = Arc::clone(&v);
+        let h = Arc::clone(&h);
         move || {
-            let pool = ThreadPool::with_name("worker".into(), 2);
+            let pool = ThreadPool::with_name("worker".into(), max(1, num_cpus::get()));
             loop {
-                let mut vector = v.lock().unwrap();
-                if !vector.is_empty() {
-                    let task = vector.pop().unwrap();
-                    pool.execute(|| {
-                        task.run();
-                    })
+                let mut heap = h.lock().unwrap();
+                if !heap.is_empty() {
+                    let task = heap.pop().unwrap();
+                    pool.execute(|| task.t.run())
                 }
             }
         }
@@ -54,12 +79,16 @@ static QUEUE: Lazy<channel::Sender<Task>> = Lazy::new(|| {
     sender
 });
 
-fn spawn<F, R>(future: F) -> JoinHandle<R>
+pub fn spawn<F, R>(future: F, priority: usize) -> JoinHandle<R>
 where
     F: Future<Output = R> + Send + 'static,
     R: Send + 'static,
 {
-    let (task, handle) = async_task::spawn(future, |t| QUEUE.send(t).unwrap(), ());
+    let (task, handle) = async_task::spawn(
+        future,
+        move |t| QUEUE.send(TaskContainer { t, priority }).unwrap(),
+        (),
+    );
     task.schedule();
     JoinHandle(handle)
 }
@@ -71,42 +100,58 @@ mod test {
     fn parses_nothing() {
         futures::executor::block_on(async {
             // Spawn a future.
-            let handle = spawn(async {
-                println!("Running task...");
-                thread::sleep(time::Duration::from_secs(10));
-                1
-            });
-            let handle2 = spawn(async {
-                println!("Running task...");
-                thread::sleep(time::Duration::from_secs(10));
-                2
-            });
-            let handle3 = spawn(async {
-                println!("Running task...");
-                thread::sleep(time::Duration::from_secs(10));
-                3
-            });
-            let handle4 = spawn(async {
-                println!("Running task...");
-                thread::sleep(time::Duration::from_secs(10));
-                4
-            });
-            let handle5 = spawn(async {
-                println!("Running task...");
-                thread::sleep(time::Duration::from_secs(10));
-                5
-            });
-            let handle6 = spawn(async {
-                println!("Running task...");
-                thread::sleep(time::Duration::from_secs(10));
-                6
-            });
+            let handle: JoinHandle<i32> = spawn(
+                async {
+                    println!("Running task 1...");
+                    thread::sleep(time::Duration::from_secs(10));
+                    1
+                },
+                1,
+            );
+            let handle2 = spawn(
+                async {
+                    println!("Running task 2...");
+                    thread::sleep(time::Duration::from_secs(10));
+                    2
+                },
+                2,
+            );
+            let handle3 = spawn(
+                async {
+                    println!("Running task 3...");
+                    thread::sleep(time::Duration::from_secs(10));
+                    3
+                },
+                3,
+            );
+            let handle4 = spawn(
+                async {
+                    println!("Running task 4...");
+                    thread::sleep(time::Duration::from_secs(10));
+                    4
+                },
+                4,
+            );
+            let handle5 = spawn(
+                async {
+                    println!("Running task 5...");
+                    thread::sleep(time::Duration::from_secs(10));
+                    5
+                },
+                5,
+            );
+            let handle6 = spawn(
+                async {
+                    println!("Running task 6...");
+                    thread::sleep(time::Duration::from_secs(10));
+                    6
+                },
+                6,
+            );
 
             // Await its output.
-            //assert_eq!(handle.await, 3);
             let (a, b, c, d, e, f) =
                 futures::join!(handle, handle2, handle3, handle4, handle5, handle6);
-            println!("{} {} {} {} {} {}", a, b, c, d, e, f);
         });
     }
 }
